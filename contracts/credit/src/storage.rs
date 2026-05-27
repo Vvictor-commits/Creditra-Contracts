@@ -25,6 +25,8 @@ pub enum DataKey {
     /// Per-borrower max utilization ratio cap in basis points (e.g. 8000 = 80%).
     /// When set, draw_credit enforces: utilized_amount <= credit_limit * cap_bps / 10_000.
     UtilizationCapBps(Address),
+    /// Storage schema version, written once during init.
+    SchemaVersion,
 }
 
 /// Maximum number of credit lines returned per page.
@@ -204,11 +206,6 @@ pub fn assert_not_paused(env: &Env) {
     if is_paused(env) {
         env.panic_with_error(crate::types::ContractError::Paused);
     }
-}
-
-/// Instance storage key for the grace period policy.
-pub fn grace_period_key(env: &Env) -> Symbol {
-    Symbol::new(env, "grace_cfg")
 }
 
 /// Assert that a timestamp update is monotonic.
