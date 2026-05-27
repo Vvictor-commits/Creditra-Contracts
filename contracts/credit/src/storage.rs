@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::types::ContractError;
-use soroban_sdk::{contracttype, Env, Symbol};
+use soroban_sdk::{contracttype, Address, Env, Symbol};
 
 /// Storage keys used in instance and persistent storage.
 #[contracttype]
@@ -100,31 +100,47 @@ pub fn clear_reentrancy_guard(env: &Env) {
     env.storage().instance().set(&reentrancy_key(env), &false);
 }
 
-/// Check whether a borrower is blocked from drawing credit.
-///
-/// # Storage
-/// - **Type**: Persistent storage (independent TTL per borrower)
-/// - **Key**: `DataKey::BlockedBorrower(borrower)`
-/// - **TTL Note**: Each borrower's block status has its own TTL, independent
-///   of their credit line data. TTL should be extended on access.
-pub fn is_borrower_blocked(env: &Env, borrower: &Address) -> bool {
+// ── BlockedBorrower Storage Policy ───────────────────────────────────────────
+//
+// Key: DataKey::BlockedBorrower(Address)
+// Type: Persistent (survives archival window; bump on every read/write)
+// Value: bool — true = blocked; absent key == not blocked (never store false)
+//
+// TTL: Bumped to BLOCKED_BORROWER_TTL on every read and write.
+// Absence of a key is equivalent to "not blocked"; a restored-but-missing
+// key must NOT be treated as blocked.
+// ─────────────────────────────────────────────────────────────────────────────
+const BLOCKED_BORROWER_TTL: u32 = 3_110_400; // ~6 months at 5 s/ledger
+const BLOCKED_BORROWER_BUMP: u32 = 1_555_200; // bump threshold ~3 months
+
+/// Store `borrower` as blocked. Bumps TTL.
+pub fn set_borrower_blocked(env: &Env, borrower: &Address) {
+    let key = DataKey::BlockedBorrower(borrower.clone());
+    env.storage().persistent().set(&key, &true);
     env.storage()
         .persistent()
-        .get(&DataKey::BlockedBorrower(borrower.clone()))
-        .unwrap_or(false)
+        .extend_ttl(&key, BLOCKED_BORROWER_BUMP, BLOCKED_BORROWER_TTL);
 }
 
-/// Set or clear the blocked status for a borrower.
-///
-/// # Storage
-/// - **Type**: Persistent storage (independent TTL per borrower)
-/// - **Key**: `DataKey::BlockedBorrower(borrower)`
-/// - **TTL Note**: Writes extend the TTL for this specific borrower's block flag.
-#[allow(dead_code)]
-pub fn set_borrower_blocked(env: &Env, borrower: &Address, blocked: bool) {
-    env.storage()
-        .persistent()
-        .set(&DataKey::BlockedBorrower(borrower.clone()), &blocked);
+/// Remove the blocked entry for `borrower`. No-op if not blocked (idempotent).
+pub fn set_borrower_unblocked(env: &Env, borrower: &Address) {
+    let key = DataKey::BlockedBorrower(borrower.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage().persistent().remove(&key);
+    }
+}
+
+/// Return true if `borrower` is currently blocked. Bumps TTL on hit.
+pub fn is_borrower_blocked(env: &Env, borrower: &Address) -> bool {
+    let key = DataKey::BlockedBorrower(borrower.clone());
+    if env.storage().persistent().has(&key) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, BLOCKED_BORROWER_BUMP, BLOCKED_BORROWER_TTL);
+        env.storage().persistent().get(&key).unwrap_or(false)
+    } else {
+        false
+    }
 }
 
 /// Get the configured minimum draw interval in seconds.
