@@ -61,6 +61,7 @@ pub enum CreditStatus {
 /// | 27   | `InsufficientRepaymentBalance` | Borrower balance cannot cover repayment |
 /// | 28   | `RepayExceedsMaxAmount`        | Repay amount exceeds per-transaction cap |
 /// | 29   | `DrawCooldownActive`          | Borrower attempted to draw before cooldown elapsed |
+/// | 30   | `ExposureCapExceeded`         | Draw would exceed the global protocol exposure cap |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -123,6 +124,8 @@ pub enum ContractError {
     RepayExceedsMaxAmount = 28,
     /// Borrower attempted to draw again before the cooldown interval elapsed.
     DrawCooldownActive = 29,
+    /// Draw would push total protocol utilization above the configured global exposure cap.
+    ExposureCapExceeded = 30,
 }
 
 /// Stored credit line data for a borrower.
@@ -233,6 +236,8 @@ pub struct ProtocolConfig {
     pub liquidity_token: Option<Address>,
     /// Configured liquidity source.
     pub liquidity_source: Option<Address>,
-    /// Configured rate change limits.
-    pub rate_change_config: Option<RateChangeConfig>,
+    /// Max absolute rate change per update, if limits are configured.
+    pub max_rate_change_bps: Option<u32>,
+    /// Minimum seconds between rate changes, if limits are configured.
+    pub rate_change_min_interval: Option<u64>,
 }

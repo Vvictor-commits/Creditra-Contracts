@@ -16,14 +16,7 @@ pub mod events;
 mod freeze;
 mod lifecycle;
 mod query;
-mod accrual;
 mod math_utils;
-mod risk;
-mod storage;
-pub mod types;
-use crate::storage::{DataKey, rate_cfg_key};
-use crate::auth::require_admin_auth;
-use crate::storage::{clear_reentrancy_guard, set_reentrancy_guard};
 mod risk;
 mod storage;
 pub mod types;
@@ -49,6 +42,7 @@ use crate::storage::{
     set_borrower_blocked as storage_set_borrower_blocked,
     set_borrower_unblocked,
     is_borrower_blocked as storage_is_borrower_blocked,
+    persist_credit_line, MAX_ENUMERATION_LIMIT, get_borrower_by_credit_line_id,
 };
 use crate::types::{
     ContractError, CreditLineData, CreditStatus, GracePeriodConfig, GraceWaiverMode,
@@ -351,6 +345,20 @@ impl Credit {
             if updated_utilized > cap_amount {
                 clear_reentrancy_guard(&env);
                 panic!("exceeds utilization cap");
+            }
+        }
+
+        // Global protocol exposure cap: block draws that would push total
+        // utilization across all lines above the configured maximum.
+        if let Some(max_exposure) = crate::storage::get_max_total_exposure(&env) {
+            let current_total = crate::storage::get_total_utilized(&env);
+            let projected = current_total.checked_add(amount).unwrap_or_else(|| {
+                clear_reentrancy_guard(&env);
+                env.panic_with_error(ContractError::Overflow)
+            });
+            if projected > max_exposure {
+                clear_reentrancy_guard(&env);
+                env.panic_with_error(ContractError::ExposureCapExceeded);
             }
         }
 
@@ -664,6 +672,29 @@ impl Credit {
         crate::storage::get_total_utilized(&env)
     }
 
+    /// Set the maximum total utilization allowed across all credit lines (admin only).
+    ///
+    /// Once set, `draw_credit` reverts with [`ContractError::ExposureCapExceeded`] if
+    /// `total_utilized + amount > max_total_exposure`.
+    ///
+    /// Pass `0` to remove the cap entirely (no protocol-wide limit).
+    ///
+    /// # Errors
+    /// - Reverts with [`ContractError::InvalidAmount`] if `amount` is negative.
+    /// - Reverts if caller is not the configured admin.
+    pub fn set_max_total_exposure(env: Env, amount: i128) {
+        require_admin_auth(&env);
+        if amount < 0 {
+            env.panic_with_error(ContractError::InvalidAmount);
+        }
+        crate::storage::set_max_total_exposure(&env, amount);
+    }
+
+    /// Get the configured global exposure cap, or `None` if uncapped.
+    pub fn get_max_total_exposure(env: Env) -> Option<i128> {
+        crate::storage::get_max_total_exposure(&env)
+    }
+
     /// Get the number of indexed credit lines.
     pub fn get_credit_line_count(env: Env) -> u32 {
         crate::storage::get_credit_line_count(&env)
@@ -818,10 +849,13 @@ impl Credit {
     /// - `liquidity_source`: `None` until `init` is called (defaults to contract address).
     /// - `rate_change_config`: `None` until `set_rate_change_limits` is called.
     pub fn get_protocol_config(env: Env) -> ProtocolConfig {
+        let rate_cfg: Option<crate::types::RateChangeConfig> =
+            env.storage().instance().get(&rate_cfg_key(&env));
         ProtocolConfig {
             liquidity_token: env.storage().instance().get(&DataKey::LiquidityToken),
             liquidity_source: env.storage().instance().get(&DataKey::LiquiditySource),
-            rate_change_config: env.storage().instance().get(&rate_cfg_key(&env)),
+            max_rate_change_bps: rate_cfg.as_ref().map(|c| c.max_rate_change_bps),
+            rate_change_min_interval: rate_cfg.map(|c| c.rate_change_min_interval),
         }
     }
 }
@@ -4104,3 +4138,4 @@ mod test_max_repay_amount {
         client.set_max_repay_amount(&0_i128);
     }
 }
+} // closes mod test_coverage

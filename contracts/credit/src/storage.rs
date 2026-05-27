@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-use crate::types::ContractError;
+use crate::types::{ContractError, CreditLineData};
 use soroban_sdk::{contracttype, Address, Env, Symbol};
 
 /// Storage keys used in instance and persistent storage.
@@ -35,8 +35,9 @@ pub enum DataKey {
     /// Per-borrower max utilization ratio cap in basis points (e.g. 8000 = 80%).
     /// When set, draw_credit enforces: utilized_amount <= credit_limit * cap_bps / 10_000.
     UtilizationCapBps(Address),
-    /// Storage schema version, written once during init.
-    SchemaVersion,
+    /// Protocol-wide maximum total utilization across all credit lines.
+    /// When set, draw_credit reverts if total_utilized + amount > max_total_exposure.
+    MaxTotalExposure,
 }
 
 /// Maximum number of credit lines returned per page.
@@ -69,6 +70,22 @@ pub fn get_credit_line_count(env: &Env) -> u32 {
         .instance()
         .get(&DataKey::CreditLineCount)
         .unwrap_or(0)
+}
+
+/// Return the configured global exposure cap, if set.
+pub fn get_max_total_exposure(env: &Env) -> Option<i128> {
+    env.storage().instance().get(&DataKey::MaxTotalExposure)
+}
+
+/// Set the global exposure cap. Passing `0` removes the cap.
+pub fn set_max_total_exposure(env: &Env, cap: i128) {
+    if cap == 0 {
+        env.storage().instance().remove(&DataKey::MaxTotalExposure);
+    } else {
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxTotalExposure, &cap);
+    }
 }
 
 /// Return the stable id for a borrower, if present.
