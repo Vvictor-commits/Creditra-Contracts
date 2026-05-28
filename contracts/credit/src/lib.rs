@@ -747,10 +747,11 @@ impl Credit {
         lifecycle::default_credit_line(env, borrower)
     }
 
-    /// Forgive outstanding debt without moving tokens (admin only).
-    pub fn forgive_debt(env: Env, borrower: Address, amount: i128) {
-        lifecycle::forgive_debt(env, borrower, amount)
+    pub fn reinstate_credit_line(env: Env, borrower: Address) {
+        lifecycle::reinstate_credit_line(env, borrower)
     }
+
+// duplicate wrapper removed
 
     pub fn reinstate_credit_line(env: Env, borrower: Address, target_status: CreditStatus) {
         lifecycle::reinstate_credit_line(env, borrower, target_status)
