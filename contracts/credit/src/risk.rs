@@ -20,7 +20,24 @@ pub const MAX_INTEREST_RATE_BPS: u32 = 10_000;
 /// Maximum risk score on the normalized 0-100 scale.
 pub const MAX_RISK_SCORE: u32 = 100;
 
-/// Compute the effective interest rate from a stored rate formula and score.
+/// Compute interest rate from risk score using piecewise-linear formula.
+///
+/// # Formula
+/// ```text
+/// raw_rate = base_rate_bps + (risk_score * slope_bps_per_score)
+/// effective_rate = clamp(raw_rate, min_rate_bps, min(max_rate_bps, MAX_INTEREST_RATE_BPS))
+/// ```
+///
+/// Uses saturating arithmetic to prevent overflow — if the multiplication
+/// overflows u32, it saturates to `u32::MAX` and is then clamped by the
+/// upper bound.
+///
+/// # Arguments
+/// * `cfg` — The rate formula configuration.
+/// * `risk_score` — The borrower's risk score (0–100).
+///
+/// # Returns
+/// The computed effective interest rate in basis points.
 pub fn compute_rate_from_score(cfg: &RateFormulaConfig, risk_score: u32) -> u32 {
     let raw = cfg
         .base_rate_bps
@@ -64,10 +81,7 @@ pub fn update_risk_parameters(
     assert_not_paused(&env);
     require_admin_auth(&env);
 
-    let stored_line: CreditLineData = env
-        .storage()
-        .persistent()
-        .get(&borrower)
+    let stored_line: CreditLineData = crate::storage::get_credit_line(&env, &borrower)
         .unwrap_or_else(|| env.panic_with_error(ContractError::CreditLineNotFound));
     let previous_utilized = stored_line.utilized_amount;
 
@@ -123,4 +137,29 @@ pub fn update_risk_parameters(
 
     persist_credit_line(&env, &borrower, &credit_line, previous_utilized);
     publish_risk_parameters_updated(&env, &borrower, credit_limit, effective_rate, risk_score);
+}
+
+/// Return the current rate-change guardrail configuration, if any.
+///
+/// # Parameters
+/// - `env`: The Soroban environment.
+///
+/// # Returns
+/// `Some(RateChangeConfig)` if guardrails have been configured via
+/// [`set_rate_change_limits`], or `None` if no configuration exists (meaning
+/// rate changes are unconstrained).
+pub fn get_rate_change_limits(env: Env) -> Option<RateChangeConfig> {
+    env.storage().instance().get(&rate_cfg_key(&env))
+}
+
+/// Retrieve the rate formula configuration from instance storage, if set.
+///
+/// # Storage
+/// - **Type**: Instance storage (shared TTL with all instance keys)
+/// - **Key**: `Symbol("rate_form")`
+/// - **TTL Note**: Shares instance TTL — extend alongside other instance keys.
+pub fn get_rate_formula_config(env: Env) -> Option<RateFormulaConfig> {
+    env.storage()
+        .instance()
+        .get::<_, RateFormulaConfig>(&rate_formula_key(&env))
 }
