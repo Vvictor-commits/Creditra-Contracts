@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(coverage_nightly, coverage(off))]
 
-//! Core data types for the Credit contract.
+//! Core data types for the Creditra contract.
 
 use soroban_sdk::{contracttype, Address};
 
@@ -21,6 +23,45 @@ pub enum CreditStatus {
 }
 
 /// Errors that can be returned by the Credit contract.
+///
+/// # Stability guarantee
+/// These discriminants are **permanent**. Never reorder or renumber existing
+/// variants — doing so would break deployed SDK clients. New variants must be
+/// appended at the end with the next available integer.
+///
+/// # Discriminant table (source of truth)
+/// | Code | Variant                        | Description |
+/// |------|--------------------------------|-------------|
+/// | 1    | `Unauthorized`                 | Caller is not authorized |
+/// | 2    | `NotAdmin`                     | Caller lacks admin privileges |
+/// | 3    | `CreditLineNotFound`           | Credit line does not exist |
+/// | 4    | `CreditLineClosed`             | Credit line is permanently closed |
+/// | 5    | `InvalidAmount`                | Amount is zero, negative, or otherwise invalid |
+/// | 6    | `OverLimit`                    | Draw would exceed the credit limit |
+/// | 7    | `NegativeLimit`                | Credit limit cannot be negative |
+/// | 8    | `RateTooHigh`                  | Interest rate exceeds the maximum allowed |
+/// | 9    | `ScoreTooHigh`                 | Risk score exceeds the maximum allowed (100) |
+/// | 10   | `UtilizationNotZero`           | Operation requires zero utilization |
+/// | 11   | `Reentrancy`                   | Reentrancy detected during cross-contract call |
+/// | 12   | `Overflow`                     | Arithmetic overflow during calculation |
+/// | 13   | `LimitDecreaseRequiresRepayment` | Limit decrease below utilized amount |
+/// | 14   | `AlreadyInitialized`           | Contract already initialized |
+/// | 15   | `AdminAcceptTooEarly`          | Admin acceptance attempted before delay elapsed |
+/// | 16   | `BorrowerBlocked`              | Borrower is on the blocked list |
+/// | 17   | `DrawExceedsMaxAmount`         | Draw amount exceeds per-transaction cap |
+/// | 18   | `Paused`                       | Protocol is paused; operation blocked by circuit breaker |
+/// | 19   | `DrawsFrozen`                  | Draws are globally frozen |
+/// | 20   | `CreditLineSuspended`          | Credit line is suspended |
+/// | 21   | `CreditLineDefaulted`          | Credit line is defaulted |
+/// | 22   | `MissingLiquidityToken`        | Liquidity token is not configured |
+/// | 23   | `MissingLiquiditySource`       | Liquidity source is not configured |
+/// | 24   | `InsufficientLiquidityReserve` | Reserve balance cannot cover the draw |
+/// | 25   | `LiquidityTokenCallFailed`     | Liquidity token call failed where observable |
+/// | 26   | `InsufficientRepaymentAllowance` | Borrower allowance cannot cover repayment |
+/// | 27   | `InsufficientRepaymentBalance` | Borrower balance cannot cover repayment |
+/// | 28   | `RepayExceedsMaxAmount`        | Repay amount exceeds per-transaction cap |
+/// | 29   | `DrawCooldownActive`          | Borrower attempted to draw before cooldown elapsed |
+/// | 30   | `ExposureCapExceeded`         | Draw would exceed the global protocol exposure cap |
 #[soroban_sdk::contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -53,16 +94,43 @@ pub enum ContractError {
     LimitDecreaseRequiresRepayment = 13,
     /// Contract has already been initialized; `init` may only be called once.
     AlreadyInitialized = 14,
-    /// Per-transaction draw cap exceeded.
-    DrawExceedsMaxAmount = 15,
-    /// Admin acceptance attempted before the configured delay has elapsed.
-    AdminAcceptTooEarly = 16,
+    /// Admin acceptance attempted before the delay window has elapsed.
+    AdminAcceptTooEarly = 15,
     /// Borrower is blocked from drawing credit.
-    BorrowerBlocked = 17,
+    BorrowerBlocked = 16,
+    /// The requested draw exceeds the configured per-transaction maximum.
+    DrawExceedsMaxAmount = 17,
+    /// Protocol is paused by the emergency circuit breaker.
+    Paused = 18,
+    /// All draws are globally frozen by admin for liquidity reserve operations.
+    DrawsFrozen = 19,
+    /// Action cannot be performed because the credit line is suspended.
+    CreditLineSuspended = 20,
+    /// Action cannot be performed because the credit line is defaulted.
+    CreditLineDefaulted = 21,
+    /// Liquidity token has not been configured.
+    MissingLiquidityToken = 22,
+    /// Liquidity source has not been configured.
+    MissingLiquiditySource = 23,
+    /// Liquidity reserve balance is below the requested draw amount.
+    InsufficientLiquidityReserve = 24,
+    /// Liquidity token call failed where the contract can observe it.
+    LiquidityTokenCallFailed = 25,
+    /// Borrower's token allowance is below the effective repayment amount.
+    InsufficientRepaymentAllowance = 26,
+    /// Borrower's token balance is below the effective repayment amount.
+    InsufficientRepaymentBalance = 27,
+    /// The requested repay exceeds the configured per-transaction maximum.
+    RepayExceedsMaxAmount = 28,
+    /// Borrower attempted to draw again before the cooldown interval elapsed.
+    DrawCooldownActive = 29,
+    /// Treasury address is not configured when attempting a treasury withdrawal.
+    TreasuryNotSet = 30,
 }
 
 /// Stored credit line data for a borrower.
 #[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CreditLineData {
     /// Address of the borrower.
     pub borrower: Address,
@@ -92,9 +160,21 @@ pub struct CreditLineData {
     pub suspension_ts: u64,
 }
 
-/// Admin-configurable limits on interest-rate changes.
+/// Optional installment repayment schedule attached to a credit line.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepaymentSchedule {
+    /// Required repayment amount for each installment period.
+    pub amount_per_period: i128,
+    /// Duration of a single installment period in seconds.
+    pub period_seconds: u64,
+    /// Timestamp at which the next installment is due.
+    pub next_due_ts: u64,
+}
+
+/// Admin-configurable limits on interest-rate changes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateChangeConfig {
     /// Maximum absolute change in `interest_rate_bps` allowed per single update.
     pub max_rate_change_bps: u32,
@@ -130,65 +210,44 @@ pub struct RateFormulaConfig {
     pub max_rate_bps: u32,
 }
 
-// ─── Grace period policy ──────────────────────────────────────────────────────
-
-/// How interest is treated for a Suspended line that is within its grace window.
-///
-/// # Economics
-/// - [`GraceWaiverMode::FullWaiver`]: no interest accrues during the grace window.
-///   Borrowers get a complete interest holiday to support recovery. The protocol
-///   absorbs the cost of foregone interest.
-/// - [`GraceWaiverMode::ReducedRate`]: interest accrues at a lower rate during the
-///   grace window. Provides partial relief while keeping the borrower accountable.
-///   `reduced_rate_bps` must be ≤ the line's `interest_rate_bps`.
-///
-/// # Risks
-/// - Full waiver creates a moral-hazard incentive to trigger suspension.
-///   Mitigate by requiring admin approval for suspension and limiting grace duration.
-/// - Reduced rate still accrues debt; borrowers must be informed of the residual cost.
-///
-/// # Interaction with `default_credit_line`
-/// If admin calls `default_credit_line` while a grace period is active, the grace
-/// period ends immediately. Interest resumes at the full rate from the moment of
-/// default (the accrual checkpoint is updated at the time of the status transition).
-///
-/// # Interaction with `reinstate_credit_line`
-/// Reinstatement transitions Defaulted → Active. The grace period only applies to
-/// Suspended lines; a reinstated line accrues at its full rate immediately.
-#[contracttype]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GraceWaiverMode {
-    /// Interest is fully waived (zero accrual) during the grace window.
-    FullWaiver = 0,
-    /// Interest accrues at a reduced rate (in bps) during the grace window.
-    ReducedRate = 1,
-}
-
-/// Admin-configurable grace period policy for Suspended credit lines.
-///
-/// When set, a Suspended line that is within `grace_period_seconds` of its
-/// suspension timestamp accrues interest according to `waiver_mode` instead of
-/// the full rate. After the window expires, normal accrual resumes.
-///
-/// # Defaults
-/// The policy is **disabled by default** (not stored). No grace period applies
-/// unless an admin explicitly calls `set_grace_period_config`.
-///
-/// # Configuration
-/// - `grace_period_seconds`: Duration of the grace window in ledger seconds.
-///   Set to `0` to disable the grace period without removing the config.
-/// - `waiver_mode`: [`GraceWaiverMode::FullWaiver`] or [`GraceWaiverMode::ReducedRate`].
-/// - `reduced_rate_bps`: Effective rate during the grace window when `waiver_mode`
-///   is [`GraceWaiverMode::ReducedRate`]. Ignored for `FullWaiver`. Must be ≤ 10 000.
+/// Grace period configuration for Suspended credit lines.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GracePeriodConfig {
-    /// Seconds after suspension during which the waiver applies.
-    /// Zero disables the grace period.
+    /// Duration of the grace window in seconds.
     pub grace_period_seconds: u64,
-    /// How interest is treated within the grace window.
+    /// Type of waiver to apply during the grace period.
     pub waiver_mode: GraceWaiverMode,
-    /// Interest rate in bps applied during the grace window when
-    /// `waiver_mode == ReducedRate`. Ignored for `FullWaiver`.
+    /// Reduced rate to apply when waiver_mode is ReducedRate.
     pub reduced_rate_bps: u32,
 }
+
+/// Grace period waiver modes.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraceWaiverMode {
+    /// Full waiver - zero interest during grace period.
+    FullWaiver = 0,
+    /// Reduced rate - apply reduced_rate_bps during grace period.
+    ReducedRate = 1,
+}
+
+/// Event emitted when the rate formula config is set or cleared.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RateFormulaConfigEvent {
+    /// `true` when a config was set; `false` when cleared.
+    pub enabled: bool,
+}
+
+<<<<<<< HEAD
+=======
+/// Global protocol configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProtocolConfig {
+    /// Configured liquidity token.
+    pub liquidity_token: Option<Address>,
+    /// Configured liquidity source.
+    pub liquidity_source: Option<Address>,
+}
+>>>>>>> upstream/main

@@ -33,26 +33,41 @@ mod debt_monotonic {
     use creditra_credit::types::{CreditLineData, CreditStatus};
     use creditra_credit::{Credit, CreditClient};
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{Address, Env};
+    use soroban_sdk::{token, Address, Env};
 
     fn total_debt(line: &CreditLineData) -> i128 {
-        line.utilized_amount + line.accrued_interest
+        line.utilized_amount
     }
 
-    fn setup_initialized_contract(env: &Env) -> (CreditClient<'_>, Address, Address, Address) {
+    fn setup_initialized_contract(
+        env: &Env,
+    ) -> (CreditClient<'_>, Address, Address, Address, Address) {
         env.mock_all_auths();
         let admin = Address::generate(env);
         let borrower = Address::generate(env);
         let contract_id = env.register(Credit, ());
         let client = CreditClient::new(env, &contract_id);
         client.init(&admin);
-        (client, contract_id, admin, borrower)
+
+        let token_id = env.register_stellar_asset_contract_v2(Address::generate(env));
+        let token = token_id.address();
+        client.set_liquidity_token(&token);
+        token::StellarAssetClient::new(env, &token).mint(&contract_id, &1_000_000_i128);
+        token::StellarAssetClient::new(env, &token).mint(&borrower, &1_000_000_i128);
+        token::Client::new(env, &token).approve(
+            &borrower,
+            &contract_id,
+            &1_000_000_i128,
+            &1_000_000_u32,
+        );
+
+        (client, contract_id, admin, borrower, token)
     }
 
     #[test]
     fn debt_monotonic_across_full_lifecycle() {
         let env = Env::default();
-        let (client, _contract_id, _admin, borrower) = setup_initialized_contract(&env);
+        let (client, _contract_id, _admin, borrower, _token) = setup_initialized_contract(&env);
 
         // -- OPEN: debt starts at zero --
         client.open_credit_line(&borrower, &10_000, &500_u32, &70_u32);
@@ -154,7 +169,7 @@ mod debt_monotonic {
         let prev_debt = total_debt(&line);
 
         // -- REINSTATE: debt unchanged --
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(line.status, CreditStatus::Active);
         assert!(
@@ -167,8 +182,10 @@ mod debt_monotonic {
 
     #[test]
     fn debt_monotonic_with_simulated_interest_accrual() {
+        use soroban_sdk::testutils::Ledger;
         let env = Env::default();
-        let (client, contract_id, _admin, borrower) = setup_initialized_contract(&env);
+        env.ledger().set_timestamp(1_000);
+        let (client, contract_id, _admin, borrower, _token) = setup_initialized_contract(&env);
 
         client.open_credit_line(&borrower, &10_000, &500_u32, &70_u32);
         client.draw_credit(&borrower, &5_000);
@@ -177,12 +194,13 @@ mod debt_monotonic {
         assert_eq!(prev_debt, 5_000);
 
         // Simulate interest accrual by writing accrued_interest directly.
-        // This models the future lazy-accrual path described in
-        // docs/interest-accrual.md: accrued interest is capitalized into the
-        // accrued_interest field on each state-changing operation.
+        // last_accrual_ts must be set to current timestamp so apply_accrual
+        // sees no elapsed time and preserves the injected value.
         env.as_contract(&contract_id, || {
             let mut line: CreditLineData = env.storage().persistent().get(&borrower).unwrap();
+            let interest_added = 250 - line.accrued_interest;
             line.accrued_interest = 250;
+            line.utilized_amount += interest_added;
             line.last_accrual_ts = 1_000;
             env.storage().persistent().set(&borrower, &line);
         });
@@ -206,7 +224,7 @@ mod debt_monotonic {
             prev_debt,
             total_debt(&line)
         );
-        assert_eq!(line.utilized_amount, 6_000);
+        assert_eq!(line.utilized_amount, 6_250);
         assert_eq!(line.accrued_interest, 250);
         assert_eq!(total_debt(&line), 6_250);
         prev_debt = total_debt(&line);
@@ -223,10 +241,14 @@ mod debt_monotonic {
         assert_eq!(total_debt(&line), 6_250);
         prev_debt = total_debt(&line);
 
-        // Simulate more interest accrual
+        // Simulate more interest accrual — advance time first so apply_accrual
+        // doesn't recalculate and overwrite the injected value.
+        env.ledger().set_timestamp(2_000);
         env.as_contract(&contract_id, || {
             let mut line: CreditLineData = env.storage().persistent().get(&borrower).unwrap();
+            let interest_added = 500 - line.accrued_interest;
             line.accrued_interest = 500;
+            line.utilized_amount += interest_added;
             line.last_accrual_ts = 2_000;
             env.storage().persistent().set(&borrower, &line);
         });
@@ -243,15 +265,15 @@ mod debt_monotonic {
         // -- REPAY: allowed to decrease --
         client.repay_credit(&borrower, &2_000);
         let line = client.get_credit_line(&borrower).unwrap();
-        assert_eq!(line.utilized_amount, 4_000);
-        assert_eq!(line.accrued_interest, 0); // interest-first: 500 interest repaid first
-        assert_eq!(total_debt(&line), 4_000);
+        assert_eq!(line.utilized_amount, 4_500);
+        assert_eq!(line.accrued_interest, 0);
+        assert_eq!(total_debt(&line), 4_500);
     }
 
     #[test]
     fn debt_monotonic_multiple_draw_repay_cycles() {
         let env = Env::default();
-        let (client, _contract_id, _admin, borrower) = setup_initialized_contract(&env);
+        let (client, _contract_id, _admin, borrower, _token) = setup_initialized_contract(&env);
 
         client.open_credit_line(&borrower, &10_000, &300_u32, &50_u32);
 
@@ -302,7 +324,7 @@ mod debt_monotonic {
     #[test]
     fn debt_monotonic_status_transitions_preserve_debt() {
         let env = Env::default();
-        let (client, _contract_id, _admin, borrower) = setup_initialized_contract(&env);
+        let (client, _contract_id, _admin, borrower, _token) = setup_initialized_contract(&env);
 
         client.open_credit_line(&borrower, &5_000, &400_u32, &60_u32);
         client.draw_credit(&borrower, &3_000);
@@ -322,7 +344,7 @@ mod debt_monotonic {
         assert_eq!(total_debt(&line), debt_at_active);
 
         // Defaulted -> Active (reinstate): debt unchanged
-        client.reinstate_credit_line(&borrower);
+        client.reinstate_credit_line(&borrower, &CreditStatus::Active);
         let line = client.get_credit_line(&borrower).unwrap();
         assert_eq!(total_debt(&line), debt_at_active);
         assert_eq!(line.status, CreditStatus::Active);
@@ -333,7 +355,7 @@ mod debt_monotonic {
         use soroban_sdk::testutils::Ledger;
 
         let env = Env::default();
-        let (client, _contract_id, _admin, borrower) = setup_initialized_contract(&env);
+        let (client, _contract_id, _admin, borrower, _token) = setup_initialized_contract(&env);
 
         client.open_credit_line(&borrower, &10_000, &300_u32, &50_u32);
         client.draw_credit(&borrower, &4_000);
@@ -378,7 +400,7 @@ mod debt_monotonic {
     #[test]
     fn debt_monotonic_overpay_does_not_go_negative() {
         let env = Env::default();
-        let (client, _contract_id, _admin, borrower) = setup_initialized_contract(&env);
+        let (client, _contract_id, _admin, borrower, _token) = setup_initialized_contract(&env);
 
         client.open_credit_line(&borrower, &5_000, &300_u32, &50_u32);
         client.draw_credit(&borrower, &1_000);
