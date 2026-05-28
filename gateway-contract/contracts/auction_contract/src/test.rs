@@ -4,8 +4,9 @@ mod tests {
     use core::convert::TryFrom;
     use core::ops::Range;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::vec::Vec;
 
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger};
     use soroban_sdk::testutils::Events as _;
     use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
     use soroban_sdk::{Address, Env, Symbol, TryFromVal, TryIntoVal};
@@ -15,6 +16,13 @@ mod tests {
     const AUCTION_ID: &str = "inv_auc";
     const FUZZ_STEPS: usize = 64;
     const MAX_INCREMENT: u64 = 500;
+
+    fn advance_ledgers(env: &Env, ledgers: u32) {
+        env.ledger().with_mut(|li| {
+            li.sequence_number += ledgers;
+            li.timestamp += (ledgers as u64) * 5;
+        });
+    }
 
     fn next_u64(state: &mut u64) -> u64 {
         let mut x = *state;
@@ -251,7 +259,7 @@ mod tests {
 
         client.init_auction(&auction_id, &0, &u64::MAX, &1_i128);
 
-        let mut seed: u64 = 0xa11ce_f00d_cafe_beef;
+        let mut seed: u64 = 0xa11ced00cafebabe;
         let mut highest = 0_i128;
         for _ in 0..8 {
             let idx = pick_index(&mut seed, 0..bidders.len());
@@ -408,5 +416,75 @@ mod tests {
             t0 == Symbol::new(&env, "AUC_CLOSE")
         }).collect::<Vec<_>>();
         assert_eq!(close_events.len(), 1);
+    }
+
+    #[test]
+    fn auction_state_survives_large_ledger_advance_until_claim() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Ensure we have a non-zero starting ledger sequence/timestamp.
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 1;
+            li.timestamp = 1;
+        });
+
+        let contract_id = env.register(Auction, ());
+        let client = AuctionClient::new(&env, &contract_id);
+
+        let bidder = Address::generate(&env);
+        let auction_id = Symbol::new(&env, "ttl_claim");
+
+        client.init_auction(&auction_id, &0, &u64::MAX, &1_i128);
+        client.place_bid(&auction_id, &bidder, &100_i128);
+
+        // Jump far past the threshold window. If we fail to bump TTL, the state
+        // risks being archived and subsequent reads will fail.
+        advance_ledgers(
+            &env,
+            crate::storage::PERSISTENT_LIFETIME_THRESHOLD.saturating_add(10),
+        );
+
+        client.close_auction(&auction_id);
+        client.claim_auction(&auction_id);
+
+        let stored: crate::types::AuctionState = env
+            .as_contract(&contract_id, || env.storage().persistent().get(&auction_id))
+            .unwrap();
+        assert_eq!(stored.status, AuctionStatus::Claimed);
+    }
+
+    #[test]
+    fn settlement_marker_survives_large_ledger_advance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| {
+            li.sequence_number = 1;
+            li.timestamp = 1;
+        });
+
+        let contract_id = env.register(Auction, ());
+        let client = AuctionClient::new(&env, &contract_id);
+
+        let auction_id = Symbol::new(&env, "ttl_settle");
+        let bidder = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let credit_contract = Address::generate(&env);
+
+        client.init_auction(&auction_id, &0, &u64::MAX, &1_i128);
+        client.place_bid(&auction_id, &bidder, &100_i128);
+        client.close_auction(&auction_id);
+        client.settle_default_liquidation(&auction_id, &credit_contract, &borrower);
+
+        advance_ledgers(
+            &env,
+            crate::storage::PERSISTENT_LIFETIME_THRESHOLD.saturating_add(10),
+        );
+
+        // If the marker was archived, this would incorrectly succeed (replay).
+        let replay = catch_unwind(AssertUnwindSafe(|| {
+            client.settle_default_liquidation(&auction_id, &credit_contract, &borrower);
+        }));
+        assert!(replay.is_err(), "settlement replay should remain rejected");
     }
 }

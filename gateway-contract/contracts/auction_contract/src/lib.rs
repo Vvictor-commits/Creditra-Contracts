@@ -1,6 +1,7 @@
 #![no_std]
 
 mod events;
+mod storage;
 mod types;
 
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, Symbol};
@@ -9,6 +10,7 @@ use crate::types::*;
 use events::{
     publish_auction_closed_event, publish_bid_refunded_event, publish_default_liquidation_settlement_event,
 };
+use storage::{bump_auction_state_ttl, bump_settlement_marker_ttl};
 
 #[contract]
 pub struct Auction;
@@ -39,6 +41,7 @@ impl Auction {
             highest_bid: 0,
         };
         env.storage().persistent().set(&auction_id, &state);
+        bump_auction_state_ttl(&env, &auction_id);
     }
 
     pub fn close_auction(env: Env, auction_id: Symbol) {
@@ -47,11 +50,13 @@ impl Auction {
             .persistent()
             .get(&auction_id)
             .unwrap_or_else(|| panic!("auction not found"));
+        bump_auction_state_ttl(&env, &auction_id);
         if state.status == AuctionStatus::Closed {
             panic!("already closed");
         }
         state.status = AuctionStatus::Closed;
         env.storage().persistent().set(&auction_id, &state);
+        bump_auction_state_ttl(&env, &auction_id);
         publish_auction_closed_event(&env, auction_id, state.highest_bidder, state.highest_bid);
     }
 
@@ -70,6 +75,7 @@ impl Auction {
             .persistent()
             .get(&auction_id)
             .unwrap_or_else(|| panic!("auction not initialized"));
+        bump_auction_state_ttl(&env, &auction_id);
 
         if state.status != AuctionStatus::Open {
             panic!("auction not open");
@@ -89,7 +95,7 @@ impl Auction {
             }
 
             // Emit refund event before performing token transfer
-            publish_bid_refunded_event(&env, prev_bidder, state.highest_bid);
+            publish_bid_refunded_event(&env, prev_bidder.clone(), state.highest_bid);
 
             // Attempt refund token transfer if token address configured in instance storage
             let token_addr: Option<Address> = env
@@ -107,6 +113,7 @@ impl Auction {
         state.highest_bidder = Some(bidder);
         state.highest_bid = amount;
         env.storage().persistent().set(&auction_id, &state);
+        bump_auction_state_ttl(&env, &auction_id);
     }
 
     /// Emit an auction settlement signal for credit default liquidation orchestration.
@@ -125,12 +132,14 @@ impl Auction {
             .persistent()
             .get(&auction_id)
             .unwrap_or_else(|| panic!("auction state not found"));
+        bump_auction_state_ttl(&env, &auction_id);
 
         if state.status != AuctionStatus::Closed {
             panic!("auction not closed");
         }
 
         let settlement_key = AuctionKey::LiquidationSettled(auction_id.clone());
+        bump_settlement_marker_ttl(&env, &settlement_key);
         let already_settled = env
             .storage()
             .persistent()
@@ -141,8 +150,9 @@ impl Auction {
         }
 
         env.storage().persistent().set(&settlement_key, &true);
+        bump_settlement_marker_ttl(&env, &settlement_key);
 
-        let winner = state.highest_bidder.unwrap_or(borrower);
+        let winner = state.highest_bidder.unwrap_or(borrower.clone());
         publish_default_liquidation_settlement_event(
             &env,
             auction_id,
@@ -164,12 +174,16 @@ impl Auction {
             .persistent()
             .get(&auction_id)
             .unwrap_or_else(|| panic!("auction state not found"));
+        bump_auction_state_ttl(&env, &auction_id);
 
         if state.status != AuctionStatus::Closed {
             panic!("auction not closed");
         }
 
-        let winner = state.highest_bidder.unwrap_or_else(|| panic!("no winner"));
+        let winner = state
+            .highest_bidder
+            .clone()
+            .unwrap_or_else(|| panic!("no winner"));
         winner.require_auth();
 
         if state.status == AuctionStatus::Claimed {
@@ -180,8 +194,12 @@ impl Auction {
         let mut updated_state = state;
         updated_state.status = AuctionStatus::Claimed;
         env.storage().persistent().set(&auction_id, &updated_state);
+        bump_auction_state_ttl(&env, &auction_id);
     }
 }
+
+#[cfg(test)]
+extern crate std;
 
 #[cfg(test)]
 mod test;
