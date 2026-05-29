@@ -88,8 +88,8 @@ impl Auction {
             .get(&auction_id)
             .unwrap_or_else(|| panic!("auction not found"));
         bump_auction_state_ttl(&env, &auction_id);
-        if state.status == AuctionStatus::Closed {
-            panic!("already closed");
+        if state.status == AuctionStatus::Claimed {
+            env.panic_with_error(AuctionError::AlreadyClaimed);
         }
         state.status = AuctionStatus::Closed;
         env.storage().persistent().set(&auction_id, &state);
@@ -142,17 +142,18 @@ impl Auction {
             .instance()
             .get(&Symbol::new(&env, "bid_token"));
 
+        if let (Some(prev_bidder), Some(tkn)) = (state.highest_bidder.clone(), token_addr) {
+            let refund_amount = state.highest_bid;
+            
             // Emit refund event before performing token transfer
             publish_bid_refunded_event(&env, prev_bidder.clone(), state.highest_bid);
 
-            if let Some(tkn) = token_addr {
-                let token_client = token::Client::new(&env, &tkn);
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &prev_bidder,
-                    &refund_amount,
-                );
-            }
+            let token_client = token::Client::new(&env, &tkn);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &prev_bidder,
+                &refund_amount,
+            );
         }
 
         state.highest_bidder = Some(bidder);
@@ -176,11 +177,11 @@ impl Auction {
             .storage()
             .persistent()
             .get(&auction_id)
-            .unwrap_or_else(|| panic!("auction state not found"));
+            .unwrap_or_else(|| env.panic_with_error(AuctionError::NotFound));
         bump_auction_state_ttl(&env, &auction_id);
 
         if state.status != AuctionStatus::Closed {
-            panic!("auction not closed");
+            env.panic_with_error(AuctionError::NotClosed);
         }
 
         let settlement_key = AuctionKey::LiquidationSettled(auction_id.clone());
@@ -218,18 +219,18 @@ impl Auction {
             .storage()
             .persistent()
             .get(&auction_id)
-            .unwrap_or_else(|| panic!("auction state not found"));
+            .unwrap_or_else(|| env.panic_with_error(AuctionError::NotFound));
         bump_auction_state_ttl(&env, &auction_id);
 
         if state.status != AuctionStatus::Closed {
-            panic!("auction not closed");
+            env.panic_with_error(AuctionError::AuctionNotClosed);
         }
 
-        let winner = state.highest_bidder.clone().unwrap_or_else(|| panic!("no winner"));
+        let winner = state.highest_bidder.clone().unwrap_or_else(|| env.panic_with_error(AuctionError::NoWinner));
         winner.require_auth();
 
         if state.status == AuctionStatus::Claimed {
-            panic!("already claimed");
+            env.panic_with_error(AuctionError::AlreadyClaimed);
         }
 
         let mut updated_state = state;

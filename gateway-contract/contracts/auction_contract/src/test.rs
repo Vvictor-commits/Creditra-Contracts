@@ -579,5 +579,104 @@ mod tests {
             .as_contract(&contract_id, || env.storage().persistent().get(&auction_id))
             .unwrap();
         assert_eq!(state.highest_bid, 501_i128);
-    }
+        assert_eq!(state.highest_bid, 501_i128);
+}
+
+#[test]
+fn claim_non_winner_fails_not_winner() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let alice = Address::generate(&env);
+    let bob = Address::generate(&env);
+    let winner = Address::generate(&env);
+
+    let contract_id = env.register(Auction, ());
+    let client = AuctionClient::new(&env, &contract_id);
+
+    let auction_id = Symbol::new(&env, "claim_non_winner");
+
+    client.init_auction(&auction_id, &0, &u64::MAX, &1_i128, &0_u32);
+    client.place_bid(&auction_id, &winner, &100_i128);
+    client.close_auction(&auction_id);
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        // alice (not winner) attempts to claim
+        client.claim_auction(&auction_id);
+    }));
+    assert!(result.is_err(), "non-winner claim should fail");
+}
+
+#[test]
+fn claim_double_claim_fails_already_claimed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let winner = Address::generate(&env);
+
+    let contract_id = env.register(Auction, ());
+    let client = AuctionClient::new(&env, &contract_id);
+
+    let auction_id = Symbol::new(&env, "claim_double");
+
+    client.init_auction(&auction_id, &0, &u64::MAX, &1_i128, &0_u32);
+    client.place_bid(&auction_id, &winner, &100_i128);
+    client.close_auction(&auction_id);
+
+    // first claim succeeds
+    let first = catch_unwind(AssertUnwindSafe(|| {
+        client.claim_auction(&auction_id);
+    }));
+    assert!(first.is_ok(), "first claim should succeed");
+
+    // second claim should fail
+    let second = catch_unwind(AssertUnwindSafe(|| {
+        client.claim_auction(&auction_id);
+    }));
+    assert!(second.is_err(), "second claim should fail");
+}
+
+#[test]
+fn claim_before_close_fails_not_closed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let winner = Address::generate(&env);
+
+    let contract_id = env.register(Auction, ());
+    let client = AuctionClient::new(&env, &contract_id);
+
+    let auction_id = Symbol::new(&env, "claim_not_closed");
+
+    client.init_auction(&auction_id, &0, &u64::MAX, &1_i128, &0_u32);
+    client.place_bid(&auction_id, &winner, &100_i128);
+    // not closing the auction
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        client.claim_auction(&auction_id);
+    }));
+    assert!(result.is_err(), "claim before close should fail");
+}
+
+#[test]
+fn claim_zero_bid_auction_fails_not_winner() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let borrower = Address::generate(&env);
+
+    let contract_id = env.register(Auction, ());
+    let client = AuctionClient::new(&env, &contract_id);
+
+    let auction_id = Symbol::new(&env, "zero_bid_claim");
+
+    client.init_auction(&auction_id, &0, &u64::MAX, &1_i128, &0_u32);
+    // no bids placed
+    client.close_auction(&auction_id);
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        client.claim_auction(&auction_id);
+    }));
+    assert!(result.is_err(), "zero-bid claim should fail");
+}
 }
