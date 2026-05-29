@@ -55,21 +55,21 @@ fn compute_dutch_price(
     if duration == 0 {
         return floor_price; // Avoid division by zero
     }
-    
+
     if elapsed_time >= duration {
         return floor_price; // Clamp at floor when auction ends
     }
-    
+
     // Compute total price drop
     let price_drop = start_price
         .checked_sub(floor_price)
         .expect("start_price must be >= floor_price");
-    
+
     // Compute the portion of time elapsed as a fraction
     // Use checked arithmetic to prevent overflow
     let elapsed_i128 = elapsed_time as i128;
     let duration_i128 = duration as i128;
-    
+
     // Compute drop so far: (price_drop * elapsed_time) / duration
     // This is safe because we ensure duration > 0 and values are reasonable
     let drop_so_far = price_drop
@@ -77,12 +77,12 @@ fn compute_dutch_price(
         .expect("overflow in Dutch price calculation")
         .checked_div(duration_i128)
         .expect("division should succeed with positive duration");
-    
+
     // Current price = start_price - drop_so_far
     let current_price = start_price
         .checked_sub(drop_so_far)
         .expect("current price should not underflow");
-    
+
     // Ensure we never go below floor (shouldn't happen with correct math, but safety check)
     current_price.max(floor_price)
 }
@@ -117,7 +117,7 @@ impl Auction {
         if min_increment_bps > 10_000 {
             panic!("min_increment_bps exceeds maximum of 10000 (100%)");
         }
-        
+
         // Validate Dutch auction parameters
         if mode == AuctionMode::Dutch {
             let start = dutch_start_price.expect("dutch_start_price required for Dutch mode");
@@ -129,7 +129,7 @@ impl Auction {
                 panic!("dutch_start_price must be >= min_bid");
             }
         }
-        
+
         let config = AuctionConfig {
             mode,
             username_hash: BytesN::from_array(&env, &[0; 32]),
@@ -226,7 +226,7 @@ impl Auction {
 
                 if let (Some(prev_bidder), Some(tkn)) = (state.highest_bidder.clone(), token_addr) {
                     let refund_amount = state.highest_bid;
-                    
+
                     // Emit refund event before performing token transfer
                     publish_bid_refunded_event(&env, prev_bidder.clone(), state.highest_bid);
 
@@ -252,29 +252,41 @@ impl Auction {
                     .end_time
                     .checked_sub(state.config.start_time)
                     .unwrap_or(1);
-                
-                let start_price = state.config.dutch_start_price.unwrap_or(state.config.min_bid);
-                let floor_price = state.config.dutch_floor_price.unwrap_or(state.config.min_bid);
-                
-                let current_price = compute_dutch_price(start_price, floor_price, elapsed_time, duration);
-                
+
+                let start_price = state
+                    .config
+                    .dutch_start_price
+                    .unwrap_or(state.config.min_bid);
+                let floor_price = state
+                    .config
+                    .dutch_floor_price
+                    .unwrap_or(state.config.min_bid);
+
+                let current_price =
+                    compute_dutch_price(start_price, floor_price, elapsed_time, duration);
+
                 // Bid must be at least current price
                 if amount < current_price {
                     env.panic_with_error(AuctionError::BidTooLow);
                 }
-                
+
                 // Bid must be at least min_bid
                 if amount < state.config.min_bid {
                     env.panic_with_error(AuctionError::BidTooLow);
                 }
-                
+
                 // In Dutch auction, first qualifying bid wins - close the auction
                 state.highest_bidder = Some(bidder);
                 state.highest_bid = amount;
                 state.status = AuctionStatus::Closed;
-                
+
                 // Publish close event for Dutch auction settlement
-                publish_auction_closed_event(&env, auction_id.clone(), state.highest_bidder.clone(), state.highest_bid);
+                publish_auction_closed_event(
+                    &env,
+                    auction_id.clone(),
+                    state.highest_bidder.clone(),
+                    state.highest_bid,
+                );
             }
         }
 
@@ -294,7 +306,8 @@ impl Auction {
         credit_contract: Address,
         borrower: Address,
     ) {
-        let factory = get_factory_contract(&env).unwrap_or_else(|| panic!(AuctionError::NoFactoryContract));
+        let factory =
+            get_factory_contract(&env).unwrap_or_else(|| panic!(AuctionError::NoFactoryContract));
         if env.invoker() != factory {
             panic!(AuctionError::Unauthorized);
         }
@@ -353,7 +366,10 @@ impl Auction {
             env.panic_with_error(AuctionError::AuctionNotClosed);
         }
 
-        let winner = state.highest_bidder.clone().unwrap_or_else(|| env.panic_with_error(AuctionError::NoWinner));
+        let winner = state
+            .highest_bidder
+            .clone()
+            .unwrap_or_else(|| env.panic_with_error(AuctionError::NoWinner));
         winner.require_auth();
 
         if state.status == AuctionStatus::Claimed {
