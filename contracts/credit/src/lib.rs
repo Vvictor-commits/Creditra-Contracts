@@ -495,6 +495,16 @@ impl Credit {
         risk::set_rate_change_limits(env, max_rate_change_bps, rate_change_min_interval)
     }
 
+    /// Set a per-borrower interest rate floor (admin only).
+    pub fn set_borrower_rate_floor(env: Env, borrower: Address, floor_bps: Option<u32>) {
+        risk::set_borrower_rate_floor(env, borrower, floor_bps)
+    }
+
+    /// Get the interest rate floor for a borrower, if set.
+    pub fn get_borrower_rate_floor(env: Env, borrower: Address) -> Option<u32> {
+        storage::get_borrower_rate_floor(&env, &borrower)
+    }
+
     pub fn get_rate_change_limits(env: Env) -> Option<RateChangeConfig> {
         env.storage().instance().get(&rate_cfg_key(&env))
     }

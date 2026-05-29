@@ -25,6 +25,9 @@ pub enum DataKey {
     /// Per-borrower max utilization ratio cap in basis points (e.g. 8000 = 80%).
     /// When set, draw_credit enforces: utilized_amount <= credit_limit * cap_bps / 10_000.
     UtilizationCapBps(Address),
+    /// Per-borrower interest rate floor in basis points.
+    /// When set, the effective interest rate must be >= floor.
+    RateFloorBps(Address),
 }
 
 /// Maximum number of credit lines returned per page.
@@ -125,6 +128,23 @@ pub fn set_borrower_blocked(env: &Env, borrower: &Address, blocked: bool) {
     env.storage()
         .persistent()
         .set(&DataKey::BlockedBorrower(borrower.clone()), &blocked);
+}
+
+/// Get the interest rate floor for a borrower, if set.
+pub fn get_borrower_rate_floor(env: &Env, borrower: &Address) -> Option<u32> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RateFloorBps(borrower.clone()))
+}
+
+/// Set or clear the interest rate floor for a borrower.
+pub fn set_borrower_rate_floor(env: &Env, borrower: &Address, floor: Option<u32>) {
+    let key = DataKey::RateFloorBps(borrower.clone());
+    if let Some(floor) = floor {
+        env.storage().persistent().set(&key, &floor);
+    } else {
+        env.storage().persistent().remove(&key);
+    }
 }
 
 /// Get the configured minimum draw interval in seconds.
