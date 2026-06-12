@@ -1,8 +1,13 @@
 [workspace]
+# Resolver "2" is required for Soroban contracts: it disables feature
+# unification across the cdylib and rlib targets that ship the contract WASM.
 resolver = "2"
 
 members = [
+    # The credit-line contract is the primary protocol entrypoint.
     "contracts/credit",
+    # The auction contract is consumed as a dev-dependency by credit tests
+    # to exercise the default-liquidation hook.
     "gateway-contract/contracts/auction_contract",
 ]
 
