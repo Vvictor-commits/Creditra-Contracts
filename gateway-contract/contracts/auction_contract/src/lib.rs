@@ -2,17 +2,51 @@
 
 //! # gateway-auction
 //!
-//! Minimal English-auction contract used by the Creditra credit contract to
-//! settle defaulted collateral.
+//! Minimal English / Dutch auction contract used by the Creditra credit
+//! contract to settle defaulted collateral. The cross-contract handoff is
+//! documented in
+//! [`docs/default-liquidation-auction-hook.md`](../../../../docs/default-liquidation-auction-hook.md);
+//! the credit-side call lives in
+//! [`crate::lib::settle_default_liquidation`](../../../../contracts/credit/src/lib.rs)
+//! (cross-repo path).
 //!
-//! ## Design at a glance
-//! - English (open ascending) auction with a configurable minimum bid increment.
-//! - Anti-snipe extension: bids within an "extension window" of the close time
-//!   push the close time out by a fixed amount.
-//! - Highest bid is held by the contract; previous high bidder is refunded
-//!   atomically when outbid (see [`events::publish_bid_refunded_event`]).
-//! - Default-liquidation settlement is gated through a hook from the credit
-//!   contract; see [`publish_default_liquidation_settlement_event`].
+//! ## What
+//!
+//! - English (open ascending) mode with a configurable
+//!   `min_increment_bps`. Previous highest bidder is **atomically refunded**
+//!   when outbid, under the reentrancy guard.
+//! - Dutch (descending) mode with linear price decay
+//!   `p(t) = p_0 - (p_0 - p_f) * min(t, T) / T`. First qualifying bid
+//!   atomically flips status to Closed.
+//! - One-shot `settle_default_liquidation(auction_id, credit_contract, borrower)`
+//!   callable only by the registered factory (= the credit contract).
+//!   Replay-protected by the persistent
+//!   `AuctionKey::LiquidationSettled(auction_id)` flag.
+//! - `claim_auction(auction_id)` — winner-only payout under the
+//!   reentrancy guard.
+//!
+//! ## How
+//!
+//! - 12 `AuctionError` discriminants pinned by ABI;
+//!   `AuctionError::Reentrancy = 10` reverts on re-entered refund or claim.
+//! - Three event topics under stable symbols (`BID_RFDN`, `AUC_CLOSE`,
+//!   `LIQ_SETL`) — see [`events`].
+//! - Storage tier discipline mirrors the credit contract: small instance
+//!   state for the current auction, id-scoped persistent state for
+//!   multi-auction deployments. TTL bump cadence is ~30 d / ~7 d (auctions
+//!   are short-lived).
+//!
+//! ## Anti-snipe disclosure
+//!
+//! The PR #430 feature branch added an end-time-extension code path
+//! intended to push the close time out when a bid lands inside an
+//! extension window. After the reconciliation with
+//! `AUCTION_CLOSE_TIME_FIX.md`, the live [`place_bid`] hard-rejects bids
+//! when `now >= end_time` without extending. The anti-snipe behavior is
+//! therefore **documented but not active** in this release; treat it as
+//! planned, not delivered. See
+//! [`docs/SECURITY.md`](../../../../docs/SECURITY.md) §6 ("Known gaps") and
+//! [`WHITEPAPER.md`](../../../../WHITEPAPER.md) §6.3.
 //!
 //! ## Modules
 //! - [`errors`] — `AuctionError` codes used by the contract.
