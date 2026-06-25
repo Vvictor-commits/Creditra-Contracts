@@ -1,0 +1,30 @@
+# Cargo-deny configuration for licence and dependency safety
+# https://embarkstudios.github.io/cargo-deny/
+
+[licenses]
+# Allow only these licences for dependencies
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+]
+# Warn on duplicate licences (will become error later)
+confidence-threshold = 0.8
+
+[advisories]
+# Deny yanked crates - prevents merge-time build breakages
+deny = []
+
+[bans]
+# Warn on duplicate crate versions (will become error later)
+multiple-versions = "warn"
+# Deny yanked crates
+yanked = "deny"
+# Allow common exceptions
+skip = [
+    # Windows-specific crates that appear in dev-dependencies
+    { name = "windows_aarch64_msvc", version = "*" },
+    { name = "windows_i686_gnu", version = "*" },
+    { name = "windows_x86_64_gnu", version = "*" },
+    { name = "windows_x86_64_msvc", version = "*" },
+]
